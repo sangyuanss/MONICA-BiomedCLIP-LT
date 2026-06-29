@@ -1,0 +1,46 @@
+# BiomedCLIP add-on config for ISIC-2019-LT (IR=100).
+# Reuses MONICA's split/metric fields; adds a `biomedclip` section.
+general:
+  img_size: 224
+  seed: 1
+  num_classes: 8
+  dataset_name: 'isic'
+  method: 'BiomedCLIP'        # tag only; does NOT route through MONICA main.py
+  num_workers: 8
+
+datasets:
+  imbalance_ratio: 100
+  head: 2
+  medium: 5
+  tail: 8
+  img_path: '/mnt/sda/julie/datasets/isic2019/train/'   # server path (frozen-encoder stage only)
+  train:
+    np_path: './numpy/isic/train_100.npy'
+    dict_path: './numpy/isic/dic.npy'
+  val:
+    np_path: './numpy/isic/val_100.npy'
+    dict_path: './numpy/isic/dic.npy'
+  test:
+    np_path: './numpy/isic/test_100.npy'
+    dict_path: './numpy/isic/dic.npy'
+
+biomedclip:
+  hub_id: 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+  feature_dim: 512
+  feature_root: './biomedclip_ltc/features'
+  proto_root: './biomedclip_ltc/text_prototypes'
+  isic_label_map: './biomedclip_ltc/isic_label_map.json'
+  isic_metadata_csv: './ISIC_2019_Training_Metadata.csv'   # verification + leakage check ONLY
+  text_scheme: 'P1'          # P0 name-only | P1 modality template | P2 fine-grained clinical (Plan B)
+  extract_batch_size: 128
+  variant: 'F-full'
+  reliability_norm: 'zscore_sigmoid'
+  detach_uncertainty: True
+  lambda_init: 1.0
+  learn_logit_scale: False
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 100
+  batch_size: 512
+  seeds: [1, 2, 3]
+  lt_loss: 'CE'

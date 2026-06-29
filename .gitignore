@@ -1,1 +1,8 @@
-outputs
+outputs/
+__pycache__/
+*.pyc
+
+# BiomedCLIP add-on: large / regenerable artifacts (kept out of git)
+biomedclip_ltc/features/
+biomedclip_ltc/text_prototypes/
+*.pt

@@ -1,0 +1,14 @@
+# BiomedCLIP add-on runtime deps (install inside MONICA's conda env, or on AutoDL).
+# torch / torchvision: use the build matching your AutoDL CUDA image.
+# (MONICA dev env: python 3.12, torch 2.4.0 + cu124. A 4090 image with torch>=2.0
+#  is fine.) If torch is already provided by the AutoDL image, skip those two.
+torch>=2.0
+torchvision>=0.15
+open_clip_torch>=2.24.0
+timm>=0.9.0            # only needed to reproduce MONICA baselines (Stage 0.3)
+numpy>=1.24
+scikit-learn>=1.2
+Pillow>=9.0
+pyyaml>=6.0
+tqdm>=4.65
+tifffile>=2023.1      # used by MONICA's nct loader; harmless otherwise

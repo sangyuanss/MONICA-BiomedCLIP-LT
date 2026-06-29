@@ -1,0 +1,87 @@
+{
+  "source_gt": "C:\\Users\\Sangyuan\\Downloads\\ISIC_2019_Training_GroundTruth.csv",
+  "source_dic": "E:\\VScode\\MONICA\\numpy\\isic\\dic.npy",
+  "num_classes": 8,
+  "labels": {
+    "0": {
+      "abbrev": "NV",
+      "full_name": "melanocytic nevus",
+      "purity": 1.0,
+      "dic_count": 12875,
+      "train_lt_count": 5000,
+      "dx_breakdown": {
+        "NV": 12875
+      }
+    },
+    "1": {
+      "abbrev": "MEL",
+      "full_name": "melanoma",
+      "purity": 1.0,
+      "dic_count": 4522,
+      "train_lt_count": 2590,
+      "dx_breakdown": {
+        "MEL": 4522
+      }
+    },
+    "2": {
+      "abbrev": "BCC",
+      "full_name": "basal cell carcinoma",
+      "purity": 1.0,
+      "dic_count": 3323,
+      "train_lt_count": 1342,
+      "dx_breakdown": {
+        "BCC": 3323
+      }
+    },
+    "3": {
+      "abbrev": "BKL",
+      "full_name": "benign keratosis",
+      "purity": 1.0,
+      "dic_count": 2624,
+      "train_lt_count": 695,
+      "dx_breakdown": {
+        "BKL": 2624
+      }
+    },
+    "4": {
+      "abbrev": "AK",
+      "full_name": "actinic keratosis",
+      "purity": 1.0,
+      "dic_count": 867,
+      "train_lt_count": 360,
+      "dx_breakdown": {
+        "AK": 867
+      }
+    },
+    "5": {
+      "abbrev": "SCC",
+      "full_name": "squamous cell carcinoma",
+      "purity": 1.0,
+      "dic_count": 628,
+      "train_lt_count": 187,
+      "dx_breakdown": {
+        "SCC": 628
+      }
+    },
+    "6": {
+      "abbrev": "VASC",
+      "full_name": "vascular lesion",
+      "purity": 1.0,
+      "dic_count": 253,
+      "train_lt_count": 97,
+      "dx_breakdown": {
+        "VASC": 253
+      }
+    },
+    "7": {
+      "abbrev": "DF",
+      "full_name": "dermatofibroma",
+      "purity": 1.0,
+      "dic_count": 239,
+      "train_lt_count": 51,
+      "dx_breakdown": {
+        "DF": 239
+      }
+    }
+  }
+}

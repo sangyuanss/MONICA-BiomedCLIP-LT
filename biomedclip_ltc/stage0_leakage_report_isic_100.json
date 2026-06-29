@@ -1,0 +1,305 @@
+{
+  "dataset": "isic",
+  "imbalance_ratio": 100,
+  "split_sizes": {
+    "train": 10322,
+    "val": 400,
+    "test": 800
+  },
+  "name_overlap_train_val_count": 0,
+  "name_overlap_train_test_count": 0,
+  "name_overlap_val_test_count": 0,
+  "name_overlap_examples": {},
+  "name_overlap_clean": true,
+  "lesion_check": {
+    "images_with_lesion_id": 10599,
+    "images_without_lesion_id": 923,
+    "unique_lesions_in_splits": 6772,
+    "lesions_crossing_splits": 492,
+    "images_in_crossing_lesions": 1637,
+    "examples": {
+      "BCN_0001269": {
+        "splits": [
+          "test",
+          "train"
+        ],
+        "images": [
+          [
+            "ISIC_0071353",
+            "train"
+          ],
+          [
+            "ISIC_0056772",
+            "train"
+          ],
+          [
+            "ISIC_0067366",
+            "test"
+          ]
+        ]
+      },
+      "BCN_0003853": {
+        "splits": [
+          "train",
+          "val"
+        ],
+        "images": [
+          [
+            "ISIC_0070850",
+            "train"
+          ],
+          [
+            "ISIC_0061800",
+            "train"
+          ],
+          [
+            "ISIC_0064071",
+            "train"
+          ],
+          [
+            "ISIC_0067517",
+            "train"
+          ],
+          [
+            "ISIC_0053675",
+            "val"
+          ]
+        ]
+      },
+      "BCN_0001849": {
+        "splits": [
+          "test",
+          "train"
+        ],
+        "images": [
+          [
+            "ISIC_0063040",
+            "train"
+          ],
+          [
+            "ISIC_0063603",
+            "test"
+          ]
+        ]
+      },
+      "BCN_0004924": {
+        "splits": [
+          "train",
+          "val"
+        ],
+        "images": [
+          [
+            "ISIC_0071498",
+            "train"
+          ],
+          [
+            "ISIC_0061963",
+            "train"
+          ],
+          [
+            "ISIC_0067017",
+            "train"
+          ],
+          [
+            "ISIC_0073092",
+            "train"
+          ],
+          [
+            "ISIC_0068272",
+            "train"
+          ],
+          [
+            "ISIC_0065623",
+            "val"
+          ]
+        ]
+      },
+      "BCN_0005048": {
+        "splits": [
+          "train",
+          "val"
+        ],
+        "images": [
+          [
+            "ISIC_0061111",
+            "train"
+          ],
+          [
+            "ISIC_0064640",
+            "train"
+          ],
+          [
+            "ISIC_0060473",
+            "train"
+          ],
+          [
+            "ISIC_0056583",
+            "val"
+          ]
+        ]
+      },
+      "BCN_0001755": {
+        "splits": [
+          "test",
+          "train",
+          "val"
+        ],
+        "images": [
+          [
+            "ISIC_0064563",
+            "train"
+          ],
+          [
+            "ISIC_0071541",
+            "train"
+          ],
+          [
+            "ISIC_0068401",
+            "train"
+          ],
+          [
+            "ISIC_0055213",
+            "train"
+          ],
+          [
+            "ISIC_0056436",
+            "train"
+          ],
+          [
+            "ISIC_0068051",
+            "train"
+          ]
+        ]
+      },
+      "BCN_0002406": {
+        "splits": [
+          "test",
+          "train"
+        ],
+        "images": [
+          [
+            "ISIC_0073038",
+            "train"
+          ],
+          [
+            "ISIC_0066520",
+            "train"
+          ],
+          [
+            "ISIC_0067776",
+            "train"
+          ],
+          [
+            "ISIC_0067139",
+            "train"
+          ],
+          [
+            "ISIC_0054445",
+            "train"
+          ],
+          [
+            "ISIC_0072909",
+            "train"
+          ]
+        ]
+      },
+      "BCN_0003725": {
+        "splits": [
+          "test",
+          "train"
+        ],
+        "images": [
+          [
+            "ISIC_0060239",
+            "train"
+          ],
+          [
+            "ISIC_0070961",
+            "train"
+          ],
+          [
+            "ISIC_0055438",
+            "train"
+          ],
+          [
+            "ISIC_0066855",
+            "train"
+          ],
+          [
+            "ISIC_0057032",
+            "train"
+          ],
+          [
+            "ISIC_0054973",
+            "test"
+          ]
+        ]
+      },
+      "BCN_0003403": {
+        "splits": [
+          "test",
+          "train"
+        ],
+        "images": [
+          [
+            "ISIC_0058319",
+            "train"
+          ],
+          [
+            "ISIC_0054355",
+            "train"
+          ],
+          [
+            "ISIC_0070207",
+            "train"
+          ],
+          [
+            "ISIC_0060698",
+            "train"
+          ],
+          [
+            "ISIC_0054193",
+            "train"
+          ],
+          [
+            "ISIC_0066481",
+            "train"
+          ]
+        ]
+      },
+      "BCN_0000920": {
+        "splits": [
+          "train",
+          "val"
+        ],
+        "images": [
+          [
+            "ISIC_0066401",
+            "train"
+          ],
+          [
+            "ISIC_0069504",
+            "train"
+          ],
+          [
+            "ISIC_0069967",
+            "train"
+          ],
+          [
+            "ISIC_0058237",
+            "train"
+          ],
+          [
+            "ISIC_0054982",
+            "train"
+          ],
+          [
+            "ISIC_0063302",
+            "train"
+          ]
+        ]
+      }
+    },
+    "clean": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "dataset": "kvasir",
+  "imbalance_ratio": 20,
+  "split_sizes": {
+    "train": 4656,
+    "val": 700,
+    "test": 1400
+  },
+  "name_overlap_train_val_count": 0,
+  "name_overlap_train_test_count": 0,
+  "name_overlap_val_test_count": 0,
+  "name_overlap_examples": {},
+  "name_overlap_clean": true,
+  "lesion_check": "N/A (no patient/lesion metadata for this dataset)"
+}

@@ -1,0 +1,43 @@
+# BiomedCLIP add-on config for KVASIR-LT (HyperKvasir labeled-images, IR=20).
+general:
+  img_size: 224
+  seed: 1
+  num_classes: 14
+  dataset_name: 'kvasir'
+  method: 'BiomedCLIP'
+  num_workers: 8
+
+datasets:
+  imbalance_ratio: 20
+  head: 4
+  medium: 8
+  tail: 14
+  img_path: '/mnt/sda/julie/datasets/gastrointestinal/labeled-images/'
+  train:
+    np_path: './numpy/kvasir/train_20.npy'
+    dict_path: './numpy/kvasir/dic.npy'
+  val:
+    np_path: './numpy/kvasir/val_20.npy'
+    dict_path: './numpy/kvasir/dic.npy'
+  test:
+    np_path: './numpy/kvasir/test_20.npy'
+    dict_path: './numpy/kvasir/dic.npy'
+
+biomedclip:
+  hub_id: 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+  feature_dim: 512
+  feature_root: './biomedclip_ltc/features'
+  proto_root: './biomedclip_ltc/text_prototypes'
+  text_scheme: 'P1'          # P0 name-only | P1 modality template | P2 fine-grained clinical (Plan B)
+  extract_batch_size: 128
+  variant: 'F-full'
+  reliability_norm: 'zscore_sigmoid'
+  detach_uncertainty: True
+  lambda_init: 1.0
+  learn_logit_scale: False
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 100
+  batch_size: 512
+  seeds: [1, 2, 3]
+  lt_loss: 'CE'
