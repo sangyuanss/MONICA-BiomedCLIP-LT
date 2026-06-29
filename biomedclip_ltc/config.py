@@ -36,14 +36,34 @@ _DEFAULTS = {
 }
 
 
+# Env-var overrides so server cache paths need not be hard-coded in tracked YAML
+# (avoids git-pull conflicts). Set these on the machine instead of editing configs.
+_ENV_OVERRIDES = {
+    "feature_root": "BIOMEDCLIP_FEATURE_ROOT",
+    "proto_root": "BIOMEDCLIP_PROTO_ROOT",
+    "isic_metadata_csv": "BIOMEDCLIP_ISIC_METADATA_CSV",
+    "isic_label_map": "BIOMEDCLIP_ISIC_LABEL_MAP",
+}
+
+
 def load_config(yml_path):
-    """Load a MONICA-style YAML and ensure cfg.biomedclip has all defaults."""
+    """Load a MONICA-style YAML and ensure cfg.biomedclip has all defaults.
+
+    Environment variables (see _ENV_OVERRIDES) take precedence over the YAML for
+    machine-specific paths, e.g. on AutoDL:
+        export BIOMEDCLIP_FEATURE_ROOT=/root/autodl-tmp/feature_cache/isic_ir100/features
+        export BIOMEDCLIP_PROTO_ROOT=/root/autodl-tmp/feature_cache/isic_ir100/text_prototypes
+    """
+    import os
     cfg = Config(yml_path)
     if cfg.biomedclip is None:
         cfg.biomedclip = Config()
     for k, v in _DEFAULTS.items():
         if k not in cfg.biomedclip:
             cfg.biomedclip[k] = v
+    for k, env in _ENV_OVERRIDES.items():
+        if os.environ.get(env):
+            cfg.biomedclip[k] = os.environ[env]
     return cfg
 
 

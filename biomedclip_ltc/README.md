@@ -15,6 +15,15 @@ conda activate MONICA              # MONICA's env
 pip install -r biomedclip_ltc/requirements.txt   # adds open_clip_torch, etc.
 ```
 
+### Cache paths via env vars (recommended on servers; avoids editing tracked YAML)
+```bash
+export BIOMEDCLIP_FEATURE_ROOT=/root/autodl-tmp/feature_cache/isic_ir100/features
+export BIOMEDCLIP_PROTO_ROOT=/root/autodl-tmp/feature_cache/isic_ir100/text_prototypes
+# optional: export BIOMEDCLIP_ISIC_METADATA_CSV=/path/ISIC_2019_Training_Metadata.csv
+```
+These override `feature_root`/`proto_root` in the YAML, so you never have to modify
+config files on the server (no `git pull` conflicts).
+
 ## Smoke test (CPU, no GPU / images / BiomedCLIP needed)
 
 Validates the whole train -> evaluate_test path on a synthetic cache:
