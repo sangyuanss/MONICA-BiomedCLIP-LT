@@ -12,12 +12,21 @@ reused unchanged at test time:
 Class reliability is estimated from TRAIN only by text_reliability.py. The test
 split can be evaluated either after a validation search with --test (legacy
 debug convenience) or strictly with --eval-split test --load-best-config.
+
+Probability-domain modes are also provided for the low-cost next experiment:
+prob_fixed, prob_G, prob_Q, prob_R, prob_GQ, prob_GR, prob_QR, prob_GQR.
+They mix calibrated visual/text probabilities with a sample-class gate:
+
+    a_ic = alpha_max * G_i * Q_c * R_c
+    p_hat_ic = (1 - a_ic) * p_v_ic + a_ic * p_t_ic
+    p_fuse = normalize(p_hat)
 """
 import argparse
 import csv
 import os
 
 import torch
+import torch.nn.functional as F
 
 from biomedclip_ltc import calibration
 from biomedclip_ltc import config as cfgmod
@@ -29,6 +38,14 @@ from biomedclip_ltc.model import VisualHead
 
 DEFAULT_ALPHAS = [round(0.1 * i, 1) for i in range(11)]
 DEFAULT_LAMBDAS = [round(0.1 * i, 1) for i in range(11)]
+DEFAULT_PROB_ALPHA_MAXES = [0.1, 0.2, 0.3, 0.4]
+DEFAULT_GAMMAS = [0.0, 0.25, 0.5, 1.0]
+DEFAULT_ETAS = [0.0, 0.5, 1.0]
+PROB_MODES = (
+    "prob_fixed", "prob_G", "prob_Q", "prob_R",
+    "prob_GQ", "prob_GR", "prob_QR", "prob_GQR",
+)
+ALL_MODES = tuple(calibration.MODES) + PROB_MODES
 
 
 def parse_float_grid(value, default):
@@ -37,10 +54,94 @@ def parse_float_grid(value, default):
     return [float(x) for x in value.split(",") if x.strip()]
 
 
+def parse_two_floats(value, default):
+    vals = parse_float_grid(value, default)
+    if len(vals) != 2:
+        raise ValueError(f"expected two comma-separated values, got {value}")
+    lo, hi = vals
+    if not 0 <= lo < hi <= 1:
+        raise ValueError(f"quantiles must satisfy 0 <= low < high <= 1, got {vals}")
+    return lo, hi
+
+
+def is_prob_mode(mode):
+    return mode in PROB_MODES
+
+
+def prob_uses_gate(mode, name):
+    return name in mode.replace("prob_", "")
+
+
 def fuse(visual_logits, text_logits, alpha, Tv, Tt):
     """alpha: scalar or [N] tensor. Returns fused logits [N,C]."""
     a = alpha if not torch.is_tensor(alpha) else alpha.unsqueeze(1)
     return visual_logits / float(Tv) + a * (text_logits / float(Tt))
+
+
+def prob_scores(visual_logits, text_logits, alpha_ic, Tv, Tt, eps=1e-8):
+    """Probability-domain fusion, returned as log-prob scores for MONICA metrics."""
+    p_v = F.softmax(visual_logits / float(Tv), dim=1)
+    p_t = F.softmax(text_logits / float(Tt), dim=1)
+    if not torch.is_tensor(alpha_ic):
+        alpha_ic = torch.full_like(p_v, float(alpha_ic))
+    elif alpha_ic.dim() == 1:
+        alpha_ic = alpha_ic[:, None].expand_as(p_v)
+    alpha_ic = alpha_ic.to(p_v.device).clamp(0.0, 1.0)
+    p_hat = (1.0 - alpha_ic) * p_v + alpha_ic * p_t
+    p_fuse = p_hat / p_hat.sum(dim=1, keepdim=True).clamp_min(eps)
+    return p_fuse.clamp_min(eps).log()
+
+
+def uncertainty_components(visual_logits, temperature=1.0, eps=1e-8):
+    p = F.softmax(visual_logits / float(temperature), dim=1)
+    ent = -(p * p.clamp_min(eps).log()).sum(dim=1)
+    ent = (ent / torch.log(torch.tensor(float(p.shape[1]), device=p.device))).clamp(0.0, 1.0)
+    top2 = p.topk(2, dim=1).values
+    margin_u = (1.0 - (top2[:, 0] - top2[:, 1])).clamp(0.0, 1.0)
+    return ent, margin_u
+
+
+def combined_uncertainty(visual_logits, temperature=1.0, eta=1.0):
+    ent, margin_u = uncertainty_components(visual_logits, temperature)
+    return (float(eta) * ent + (1.0 - float(eta)) * margin_u).clamp(0.0, 1.0)
+
+
+def map_uncertainty_gate(uncertainty, tau_low, tau_high, eps=1e-8):
+    return ((uncertainty - float(tau_low)) / (float(tau_high) - float(tau_low) + eps)).clamp(0.0, 1.0)
+
+
+def fit_uncertainty_gate(uncertainty, low_q=0.3, high_q=0.8):
+    tau_low = float(torch.quantile(uncertainty, float(low_q)).item())
+    tau_high = float(torch.quantile(uncertainty, float(high_q)).item())
+    if tau_high <= tau_low:
+        tau_high = tau_low + 1e-6
+    return map_uncertainty_gate(uncertainty, tau_low, tau_high), tau_low, tau_high
+
+
+def class_tail_need(cfg, gamma, eps=1e-6):
+    """Q_c in [0,1]: long-tail compensation need from TRAIN counts only."""
+    _, train_labels = datamod.load_split(cfg, "train")
+    counts = torch.bincount(train_labels, minlength=cfg.general.num_classes).float()
+    need = (counts + eps).pow(-float(gamma))
+    return need / need.max().clamp_min(eps)
+
+
+def build_prob_alpha(mode, n, C, alpha_max, gate=None, tail_need=None,
+                     class_rel=None, device=None):
+    alpha = torch.full((n, C), float(alpha_max), device=device)
+    if prob_uses_gate(mode, "G"):
+        if gate is None:
+            raise ValueError(f"{mode} requires sample uncertainty gate G")
+        alpha = alpha * gate.to(device)[:, None]
+    if prob_uses_gate(mode, "Q"):
+        if tail_need is None:
+            raise ValueError(f"{mode} requires class tail-need vector Q")
+        alpha = alpha * tail_need.to(device)[None, :]
+    if prob_uses_gate(mode, "R"):
+        if class_rel is None:
+            raise ValueError(f"{mode} requires class text reliability R")
+        alpha = alpha * class_rel.to(device)[None, :]
+    return alpha.clamp(0.0, float(alpha_max))
 
 
 def load_text_temperature(cfg, scheme, override):
@@ -90,7 +191,8 @@ def compute_signals(visual_logits, text_logits, Tv, Tt, class_rel):
 
 
 def need_reliability(mode):
-    return mode in ("reliability_only", "adaptive")
+    return mode in ("reliability_only", "adaptive") or (
+        is_prob_mode(mode) and prob_uses_gate(mode, "R"))
 
 
 def get_class_reliability(cfg, scheme, Tt, mode, allow_compute):
@@ -150,35 +252,53 @@ def make_alpha(mode, selected, n, u, s, alpha_max):
     return alpha, gate_mean
 
 
-def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, s, alpha):
+def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, s,
+                     alpha, gate=None, tail_need=None, class_rel=None):
     utils.ensure_dir(os.path.dirname(path))
     if not torch.is_tensor(alpha):
         alpha = torch.full((labels.shape[0],), float(alpha))
     v_pred = visual_logits.argmax(dim=1)
     t_pred = text_logits.argmax(dim=1)
     f_pred = fused_logits.argmax(dim=1)
+    alpha_is_matrix = alpha.dim() == 2
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "index", "label", "visual_prediction", "text_prediction",
             "fusion_prediction", "visual_uncertainty",
-            "sample_text_reliability", "alpha",
+            "sample_text_reliability", "visual_gate",
+            "tail_need_fusion_prediction", "text_reliability_fusion_prediction",
+            "alpha", "alpha_fusion_prediction",
         ])
         writer.writeheader()
         for i in range(labels.shape[0]):
+            fp = int(f_pred[i])
+            if alpha_is_matrix:
+                alpha_mean = float(alpha[i].mean())
+                alpha_fp = float(alpha[i, fp])
+            else:
+                alpha_mean = float(alpha[i])
+                alpha_fp = float(alpha[i])
             writer.writerow({
                 "index": i,
                 "label": int(labels[i]),
                 "visual_prediction": int(v_pred[i]),
                 "text_prediction": int(t_pred[i]),
-                "fusion_prediction": int(f_pred[i]),
+                "fusion_prediction": fp,
                 "visual_uncertainty": float(u[i]),
                 "sample_text_reliability": "" if s is None else float(s[i]),
-                "alpha": float(alpha[i]),
+                "visual_gate": "" if gate is None else float(gate[i]),
+                "tail_need_fusion_prediction": "" if tail_need is None else float(tail_need[fp]),
+                "text_reliability_fusion_prediction": "" if class_rel is None else float(class_rel[fp]),
+                "alpha": alpha_mean,
+                "alpha_fusion_prediction": alpha_fp,
             })
 
 
 def run_eval_split(cfg, split, mode, scheme, selected, head, protos, logit_scale,
                    meta, class_rel, alpha_max, out):
+    if is_prob_mode(mode):
+        return run_prob_eval_split(cfg, split, mode, scheme, selected, head, protos,
+                                   logit_scale, meta, class_rel, out)
     labels, v, t = load_split_logits(cfg, split, head, protos, logit_scale, meta)
     u, s = compute_signals(v, t, selected["Tv"], selected["Tt"], class_rel)
     alpha, _ = make_alpha(mode, selected, labels.shape[0], u, s, alpha_max)
@@ -198,8 +318,57 @@ def run_eval_split(cfg, split, mode, scheme, selected, head, protos, logit_scale
     return res, alpha
 
 
+def run_prob_eval_split(cfg, split, mode, scheme, selected, head, protos,
+                        logit_scale, meta, class_rel, out):
+    labels, v, t = load_split_logits(cfg, split, head, protos, logit_scale, meta)
+    U = combined_uncertainty(v, selected["Tv"], selected.get("eta", 1.0))
+    gate = None
+    if prob_uses_gate(mode, "G"):
+        gate = map_uncertainty_gate(U, selected["tau_low"], selected["tau_high"])
+    tail_need = None
+    if prob_uses_gate(mode, "Q"):
+        tail_need = class_tail_need(cfg, selected.get("gamma", 0.0))
+    alpha = build_prob_alpha(
+        mode, labels.shape[0], cfg.general.num_classes, selected["alpha_max"],
+        gate=gate, tail_need=tail_need, class_rel=class_rel, device=v.device)
+    scores = prob_scores(v, t, alpha, selected["Tv"], selected["Tt"])
+    res = metricsmod.evaluate_logits(cfg, scores, labels)
+    print(metricsmod.format_summary(res, split.upper()))
+    sample_rel = (calibration.sample_text_reliability(t, class_rel, selected["Tt"])
+                  if class_rel is not None else None)
+    save_diagnostics(os.path.join(out, f"{split}_diagnostics.csv"),
+                     labels, v, t, scores, U, sample_rel, alpha,
+                     gate=gate, tail_need=tail_need, class_rel=class_rel)
+    payload = {
+        "mode": mode,
+        "fusion_domain": "prob",
+        "text_scheme": scheme,
+        **selected,
+        split: metricsmod.results_to_jsonable(res),
+        "alpha_stats": alpha_stats(alpha),
+    }
+    utils.save_json(os.path.join(out, f"{split}_results.json"), payload)
+    return res, alpha
+
+
+def passes_selection_constraints(rec, visual_rec, auroc_drop, auprc_drop):
+    return (rec["auroc"] >= visual_rec["auroc"] - float(auroc_drop)
+            and rec["auprc"] >= visual_rec["auprc"] - float(auprc_drop))
+
+
+def selection_key(rec):
+    return (1 if rec.get("passes_constraints", True) else 0,
+            rec["group_avg_acc"], rec["tail_acc"], rec["macro_f1"],
+            rec["auroc"], rec["auprc"])
+
+
 def validation_search(cfg, args, mode, scheme, head, protos, logit_scale, meta,
                       class_rel, Tt, Tt_src, seed, visual_run_dir, alpha_max):
+    if is_prob_mode(mode):
+        return prob_validation_search(cfg, args, mode, scheme, head, protos,
+                                      logit_scale, meta, class_rel, Tt, Tt_src,
+                                      seed, visual_run_dir)
+
     Tv_base = float(args.visual_temperature if args.visual_temperature is not None
                     else cfgmod.bm(cfg, "visual_temperature"))
     Tv_grid = parse_float_grid(args.visual_temperatures, [Tv_base])
@@ -287,10 +456,143 @@ def validation_search(cfg, args, mode, scheme, head, protos, logit_scale, meta,
     return selected, out
 
 
+def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
+                           meta, class_rel, Tt, Tt_src, seed, visual_run_dir):
+    Tv_base = float(args.visual_temperature if args.visual_temperature is not None
+                    else cfgmod.bm(cfg, "visual_temperature"))
+    Tv_grid = parse_float_grid(args.visual_temperatures, [Tv_base])
+    alpha_maxes = parse_float_grid(args.alpha_maxes, DEFAULT_PROB_ALPHA_MAXES)
+    gammas = parse_float_grid(args.gammas, DEFAULT_GAMMAS)
+    etas = parse_float_grid(args.etas, DEFAULT_ETAS)
+    q_low, q_high = parse_two_floats(args.uncertainty_quantiles, [0.3, 0.8])
+
+    uses_G = prob_uses_gate(mode, "G")
+    uses_Q = prob_uses_gate(mode, "Q")
+    uses_R = prob_uses_gate(mode, "R")
+    gamma_grid = gammas if uses_Q else [0.0]
+    eta_grid = etas if uses_G else [1.0]
+
+    labels, va_v, va_t = load_split_logits(cfg, "val", head, protos, logit_scale, meta)
+    n_val, C = labels.shape[0], cfg.general.num_classes
+    print(f"[fusion] mode={mode} ds={cfg.general.dataset_name} scheme={scheme} "
+          f"seed={seed} domain=prob Tv_grid={Tv_grid} Tt={Tt} ({Tt_src}) "
+          f"alpha_maxes={alpha_maxes} gammas={gamma_grid} etas={eta_grid} "
+          f"q=({q_low},{q_high}) logit_scale={logit_scale:.3f}")
+
+    search = []
+    best = None
+    for Tv in Tv_grid:
+        visual_res = metricsmod.evaluate_logits(cfg, va_v / float(Tv), labels)
+        visual_rec = metric_record(visual_res)
+        p_v_res = metricsmod.format_summary(visual_res, "visual-val")
+        print("  baseline " + p_v_res)
+        for eta in eta_grid:
+            U = combined_uncertainty(va_v, Tv, eta)
+            if uses_G:
+                G, tau_low, tau_high = fit_uncertainty_gate(U, q_low, q_high)
+            else:
+                G, tau_low, tau_high = None, None, None
+            for gamma in gamma_grid:
+                Q = class_tail_need(cfg, gamma) if uses_Q else None
+                for alpha_max in alpha_maxes:
+                    alpha = build_prob_alpha(
+                        mode, n_val, C, alpha_max, gate=G, tail_need=Q,
+                        class_rel=class_rel if uses_R else None, device=va_v.device)
+                    scores = prob_scores(va_v, va_t, alpha, Tv, Tt)
+                    res = metricsmod.evaluate_logits(cfg, scores, labels)
+                    rec = {
+                        "Tv": Tv,
+                        "Tt": Tt,
+                        "alpha_max": alpha_max,
+                        "eta": eta if uses_G else None,
+                        "gamma": gamma if uses_Q else None,
+                        "tau_low": tau_low,
+                        "tau_high": tau_high,
+                        "uncertainty_q_low": q_low if uses_G else None,
+                        "uncertainty_q_high": q_high if uses_G else None,
+                        **metric_record(res),
+                        **alpha_stats(alpha),
+                        "visual_val_group_avg_acc": visual_rec["group_avg_acc"],
+                        "visual_val_auroc": visual_rec["auroc"],
+                        "visual_val_auprc": visual_rec["auprc"],
+                    }
+                    rec["passes_constraints"] = passes_selection_constraints(
+                        rec, visual_rec, args.selection_auroc_drop,
+                        args.selection_auprc_drop)
+                    search.append(rec)
+                    status = "ok" if rec["passes_constraints"] else "drop"
+                    print(f"  Tv={Tv:g} amax={alpha_max:g} "
+                          f"eta={eta if uses_G else '-'} gamma={gamma if uses_Q else '-'} "
+                          f"[{status}]: " + metricsmod.format_summary(res, "val"))
+                    key = selection_key(rec)
+                    selected = {
+                        "Tv": Tv,
+                        "Tt": Tt,
+                        "alpha_max": alpha_max,
+                        "eta": eta if uses_G else 1.0,
+                        "gamma": gamma if uses_Q else 0.0,
+                        "tau_low": tau_low,
+                        "tau_high": tau_high,
+                        "uncertainty_q_low": q_low if uses_G else None,
+                        "uncertainty_q_high": q_high if uses_G else None,
+                        "selection_auroc_drop": args.selection_auroc_drop,
+                        "selection_auprc_drop": args.selection_auprc_drop,
+                    }
+                    if best is None or key > best[0]:
+                        best = (key, selected, res, alpha, U, G, Q, scores, rec)
+
+    _, selected, va_res, va_alpha, va_U, va_G, va_Q, va_scores, best_rec = best
+    if not best_rec["passes_constraints"]:
+        print("[fusion][warn] no probability-fusion candidate passed AUROC/AUPRC "
+              "constraints; selected the best fallback by the same ranking.")
+    print(f"[fusion] selected {selected} | " +
+          metricsmod.format_summary(va_res, "val(best)"))
+
+    out = utils.ensure_dir(utils.method_dir(
+        cfg.general.dataset_name, f"VT_{mode}_{scheme}_seed{seed}"))
+    utils.save_json(os.path.join(out, "selected_fusion.json"), {
+        "mode": mode,
+        "fusion_domain": "prob",
+        "text_scheme": scheme,
+        "seed": seed,
+        "visual_run_dir": visual_run_dir,
+        "Tv": selected["Tv"],
+        "Tt": selected["Tt"],
+        "Tt_source": Tt_src,
+        "logit_scale": logit_scale,
+        "selected": selected,
+        "search": search,
+        "val_group_avg_acc": metricsmod.group_avg_acc(va_res),
+        "alpha_stats": alpha_stats(va_alpha),
+        "selection_note": "Candidates failing AUROC/AUPRC drop constraints are ranked after valid candidates.",
+    })
+    utils.save_json(os.path.join(out, "val_results.json"), {
+        "mode": mode,
+        "fusion_domain": "prob",
+        "text_scheme": scheme,
+        **selected,
+        "val": metricsmod.results_to_jsonable(va_res),
+        "alpha_stats": alpha_stats(va_alpha),
+        "passes_constraints": best_rec["passes_constraints"],
+    })
+    utils.save_json(os.path.join(out, "per_class_val.json"), {
+        **selected,
+        "per_class_acc": list(va_res["class_acc"]),
+    })
+    sample_rel = (calibration.sample_text_reliability(va_t, class_rel, Tt)
+                  if class_rel is not None else None)
+    save_diagnostics(os.path.join(out, "val_diagnostics.csv"),
+                     labels, va_v, va_t, va_scores, va_U, sample_rel, va_alpha,
+                     gate=va_G, tail_need=va_Q, class_rel=class_rel)
+    return selected, out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--mode", default=None, choices=list(calibration.MODES))
+    ap.add_argument("--mode", default=None, choices=list(ALL_MODES))
+    ap.add_argument("--fusion-domain", default=None, choices=["logit", "prob"],
+                    help="optional convenience: --fusion-domain prob --mode fixed -> prob_fixed")
     ap.add_argument("--text-scheme", dest="text_scheme", default=None,
                     choices=["P0", "P1", "P2"])
     ap.add_argument("--visual-run-dir", default=None,
@@ -303,6 +605,18 @@ def main():
     ap.add_argument("--alphas", default=None, help="comma list for fixed mode")
     ap.add_argument("--lambdas", default=None, help="comma list for gated modes")
     ap.add_argument("--alpha-max", type=float, default=1.0)
+    ap.add_argument("--alpha-maxes", default=None,
+                    help="comma list for probability-domain alpha_max search")
+    ap.add_argument("--gammas", default=None,
+                    help="comma list for tail-need Q_c strength in probability modes")
+    ap.add_argument("--etas", default=None,
+                    help="comma list for U = eta*entropy + (1-eta)*margin uncertainty")
+    ap.add_argument("--uncertainty-quantiles", default="0.3,0.8",
+                    help="low,high validation quantiles for mapping uncertainty to G")
+    ap.add_argument("--selection-auroc-drop", type=float, default=1.0,
+                    help="prob modes: max allowed validation AUROC drop vs visual baseline")
+    ap.add_argument("--selection-auprc-drop", type=float, default=1.0,
+                    help="prob modes: max allowed validation AUPRC drop vs visual baseline")
     ap.add_argument("--load-best-config", default=None,
                     help="path to selected_fusion.json for strict test eval")
     ap.add_argument("--eval-split", default="val", choices=["val", "test"])
@@ -315,6 +629,11 @@ def main():
     mode = args.mode or (loaded or {}).get("mode")
     if mode is None:
         raise SystemExit("--mode is required unless --load-best-config is provided")
+    if args.fusion_domain == "prob" and mode in calibration.MODES:
+        mode = f"prob_{mode}" if mode == "fixed" else mode
+        if mode not in PROB_MODES:
+            raise SystemExit("--fusion-domain prob currently supports --mode fixed via "
+                             "prob_fixed; use explicit prob_G/prob_Q/... for gated modes")
     scheme = args.text_scheme or (loaded or {}).get("text_scheme") or cfgmod.bm(cfg, "text_scheme")
     visual_run_dir = args.visual_run_dir or (loaded or {}).get("visual_run_dir")
     if visual_run_dir is None:

@@ -129,6 +129,19 @@ biomedclip:
                             "--eval-split", "test"]
                 evaluate_fusion.main()
 
+        sys.argv = ["evaluate_fusion", "--config", yml, "--mode", "prob_GQR",
+                    "--text-scheme", "P1", "--visual-run-dir", run_dir,
+                    "--alpha-maxes", "0.2,0.4", "--gammas", "0.5",
+                    "--etas", "0.5", "--test"]
+        evaluate_fusion.main()
+        vt = f"{smoke_out}/VT_prob_GQR_P1_seed1"
+        for f in ("selected_fusion.json", "val_results.json", "test_results.json"):
+            assert os.path.exists(os.path.join(vt, f)), f"prob_GQR: missing {f}"
+        sys.argv = ["evaluate_fusion", "--config", yml,
+                    "--load-best-config", os.path.join(vt, "selected_fusion.json"),
+                    "--eval-split", "test"]
+        evaluate_fusion.main()
+
         print(f"\nSMOKE TEST PASSED — visual test groupAvgAcc={avg:.2f} "
               f"(chance≈{100.0/C:.1f}); text + 4 fusion modes ran end-to-end.")
     finally:
