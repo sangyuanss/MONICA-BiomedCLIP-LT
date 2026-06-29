@@ -17,7 +17,8 @@ import tempfile
 
 import numpy as np
 
-from biomedclip_ltc import train, evaluate_test, utils
+from biomedclip_ltc import (train, evaluate_test, evaluate_text,
+                            evaluate_fusion, text_reliability, calibration, utils)
 
 C, D, IR = 6, 64, 999
 HEAD, MEDIUM = 2, 4
@@ -79,28 +80,54 @@ biomedclip:
   text_scheme: 'P1'
 """)
 
-    run_glob = os.path.join("outputs", "biomedclip_ltc", "smoke", "*")
-    for d in glob.glob(run_glob):
-        shutil.rmtree(d, ignore_errors=True)
+    # synthetic P1 text prototypes = normalized class centers (proto_root == feat_root)
+    protos = centers / np.linalg.norm(centers, axis=1, keepdims=True)
+    np.save(os.path.join(feat_root, "smoke_P1.npy"), protos.astype(np.float32))
+
+    smoke_out = os.path.join("outputs", "biomedclip_ltc", "smoke")
+    shutil.rmtree(smoke_out, ignore_errors=True)
 
     try:
+        # --- Stage 2: visual head ---
         sys.argv = ["train", "--config", yml]
         train.main()
-        run_dirs = glob.glob(run_glob)
-        assert len(run_dirs) == 1, f"expected 1 run dir, got {run_dirs}"
+        run_dirs = [d for d in glob.glob(os.path.join(smoke_out, "V_*"))]
+        assert len(run_dirs) == 1, f"expected 1 visual run dir, got {run_dirs}"
         run_dir = run_dirs[0]
-        assert os.path.exists(os.path.join(run_dir, "best.pt"))
-        assert os.path.exists(os.path.join(run_dir, "config_snapshot.json"))
-        assert os.path.exists(os.path.join(run_dir, "per_class_val_best.json"))
+        for f in ("best.pt", "config_snapshot.json", "per_class_val_best.json"):
+            assert os.path.exists(os.path.join(run_dir, f)), f
+        assert "V_CE_seed1" in os.path.basename(run_dir), \
+            f"run name not renamed: {run_dir}"
 
         sys.argv = ["evaluate_test", "--run-dir", run_dir]
         evaluate_test.main()
-        res = utils.load_json(os.path.join(run_dir, "test_results.json"))
-        avg = res["test"]["accuracy"][3]
-        assert avg > 100.0 / C, f"test groupAvgAcc {avg:.2f} not above chance"
-        print(f"\nSMOKE TEST PASSED — test groupAvgAcc={avg:.2f} (chance≈{100.0/C:.1f})")
+        avg = utils.load_json(f"{run_dir}/test_results.json")["test"]["accuracy"][3]
+        assert avg > 100.0 / C, f"visual test groupAvgAcc {avg:.2f} not above chance"
+
+        # --- Stage 3: text-only ---
+        sys.argv = ["evaluate_text", "--config", yml, "--text-scheme", "P1"]
+        evaluate_text.main()
+        assert os.path.exists(f"{smoke_out}/T_P1/selected_temperature.json")
+        assert os.path.exists(f"{smoke_out}/T_P1/val_results.json")
+
+        # --- Stage 5a: class reliability (train-only) ---
+        sys.argv = ["text_reliability", "--config", yml, "--text-scheme", "P1"]
+        text_reliability.main()
+
+        # --- Stage 4/5: fusion, all four ablation modes ---
+        for mode in calibration.MODES:
+            sys.argv = ["evaluate_fusion", "--config", yml, "--mode", mode,
+                        "--text-scheme", "P1", "--visual-run-dir", run_dir, "--test"]
+            evaluate_fusion.main()
+            vt = f"{smoke_out}/VT_{mode}_P1_seed1"
+            for f in ("selected_fusion.json", "val_results.json", "test_results.json"):
+                assert os.path.exists(os.path.join(vt, f)), f"{mode}: missing {f}"
+
+        print(f"\nSMOKE TEST PASSED — visual test groupAvgAcc={avg:.2f} "
+              f"(chance≈{100.0/C:.1f}); text + 4 fusion modes ran end-to-end.")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(smoke_out, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -62,13 +62,62 @@ The trainer prints the exact `--run-dir` to use. Outputs (under `outputs/`, giti
 `best.pt`, `logs.txt`, `config_snapshot.json`, `per_class_val_best.json`,
 `test_results.json`.
 
+## Stage 3 — text-only branch (no training)
+
+```bash
+for s in P0 P1 P2; do
+  python -m biomedclip_ltc.evaluate_text --config biomedclip_ltc/configs/isic_100.yml --text-scheme $s
+done
+# final test (after the val temperature is fixed):
+python -m biomedclip_ltc.evaluate_text --config biomedclip_ltc/configs/isic_100.yml --text-scheme P1 --test
+```
+Outputs to `outputs/biomedclip_ltc/<ds>/T_<scheme>/`:
+`selected_temperature.json`, `val_results.json`, `per_class_val.json`.
+
+## Stage 5a — class text reliability (train-only, needed by reliability/adaptive)
+
+```bash
+python -m biomedclip_ltc.text_reliability --config biomedclip_ltc/configs/isic_100.yml --all
+```
+Saves `<proto_root>/<ds>_text_reliability_<scheme>.json` (reliability vector, raw
+margins, and the full class×class similarity matrix for heatmaps).
+
+## Stage 4 & 5 — visual+text fusion (four ablation modes)
+
+```bash
+VRUN=outputs/biomedclip_ltc/isic/V_CE_seed1_lr0.01_bs256_ep50   # Stage-2 run dir
+for m in fixed uncertainty_only reliability_only adaptive; do
+  python -m biomedclip_ltc.evaluate_fusion --config biomedclip_ltc/configs/isic_100.yml \
+      --mode $m --text-scheme P1 --visual-run-dir $VRUN --test
+done
+```
+`fixed` searches alpha∈[0..1]; the others search lambda∈[0.1,0.25,0.5,1,2,5].
+Outputs to `VT_<mode>_<scheme>_seed<seed>/`: `selected_fusion.json`,
+`val_results.json`, `per_class_val.json`, `test_results.json`.
+
+## Full method list (debug on seed=1; final report seeds 1,2,3 mean±std)
+
+| method | command |
+|---|---|
+| V-CE | `train ... --lt-loss CE` |
+| V-BalancedSoftmax | `train ... --lt-loss BalancedSoftmax` |
+| V-LogitAdjust | `train ... --lt-loss LogitAdjust` |
+| T-P0/P1/P2 | `evaluate_text --text-scheme P{0,1,2}` |
+| V+T-Fixed | `evaluate_fusion --mode fixed` |
+| V+T-Uncertainty | `evaluate_fusion --mode uncertainty_only` |
+| V+T-Reliability | `evaluate_fusion --mode reliability_only` |
+| V+T-Adaptive | `evaluate_fusion --mode adaptive` |
+
+Visual long-tail baselines (same params as the tuned CE run):
+```bash
+for L in CE BalancedSoftmax LogitAdjust; do
+  python -m biomedclip_ltc.train --config biomedclip_ltc/configs/isic_100.yml --lt-loss $L
+done
+```
+
 ## Text schemes (`text_scheme`; all class-level, image-only at test)
 `P0` class name only · `P1` name + modality template (default) ·
-`P2` fine-grained clinical descriptions (optional). No patient metadata in prompts.
-
-## Fusion variants (`variant`)
-`V` visual baseline (Stage 2). `T / F-fixed / F-class / F-full / A-unc / A-rel`
-arrive in Stages 3-6.
+`P2` fine-grained clinical descriptions. No patient metadata in prompts.
 
 ## Git (push to YOUR fork, not upstream PyJulie/MONICA)
 
@@ -88,5 +137,8 @@ Feature caches (`features/`, `text_prototypes/`) and `outputs/` are gitignored;
 `isic_label_map.json` and the leakage report are committed as records.
 
 ## Status
-- Stage 0 (verify + leakage), Stage 1 (extract), Stage 2 (visual head + test): done.
-- Stages 3-6: forthcoming.
+- Stage 0 (verify + leakage), Stage 1 (extract), Stage 2 (visual head + test),
+  Stage 3 (text-only), Stage 4 (fixed fusion), Stage 5 (reliability + uncertainty
+  + adaptive fusion, 4 ablation modes): implemented and CPU-smoke-tested.
+- Stage 6 (multi-seed aggregation + final results table): forthcoming.
+- Visual-head defaults updated from experiments: lr=0.01, bs=256, ep=50, cos_lr=false.

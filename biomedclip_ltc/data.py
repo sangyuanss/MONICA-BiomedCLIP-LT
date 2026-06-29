@@ -79,6 +79,15 @@ def get_cls_num_list(labels, num_classes):
     return counts.tolist()
 
 
+def get_logit_scale(cfg, default=100.0):
+    """BiomedCLIP logit scale recorded by Stage 1 (exp(model.logit_scale)), or a
+    sensible default if extract_meta.json is absent."""
+    meta = load_extract_meta(cfg)
+    if meta and meta.get("logit_scale"):
+        return float(meta["logit_scale"])
+    return float(default)
+
+
 def load_text_prototypes(cfg, scheme):
     """Return text prototypes [C, D] float32 tensor for a scheme (P0/P1/P2)."""
     root = cfgmod.bm(cfg, "proto_root")

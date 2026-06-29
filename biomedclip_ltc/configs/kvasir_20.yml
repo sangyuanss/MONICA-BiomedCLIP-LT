@@ -30,14 +30,13 @@ biomedclip:
   proto_root: './biomedclip_ltc/text_prototypes'
   text_scheme: 'P1'          # P0 name-only | P1 modality template | P2 fine-grained clinical (Plan B)
   extract_batch_size: 128
-  variant: 'F-full'
-  reliability_norm: 'zscore_sigmoid'
-  detach_uncertainty: True
-  lambda_init: 1.0
-  learn_logit_scale: False
-  lr: 0.001
+  variant: 'V'
+  reliability_temperature: 0.1
+  visual_temperature: 1.0
+  lr: 0.01
   weight_decay: 0.0
-  epochs: 100
-  batch_size: 512
+  epochs: 50
+  batch_size: 256
+  cos_lr: False
   seeds: [1, 2, 3]
   lt_loss: 'CE'

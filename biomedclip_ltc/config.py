@@ -20,15 +20,16 @@ _DEFAULTS = {
     # leakage check. It NEVER enters a prompt or the model.
     "isic_metadata_csv": "./ISIC_2019_Training_Metadata.csv",
     "text_scheme": "P1",             # P0 name-only | P1 modality template | P2 fine-grained clinical
-    "variant": "F-full",
-    "reliability_norm": "zscore_sigmoid",
-    "detach_uncertainty": True,
-    "lambda_init": 1.0,
-    "learn_logit_scale": False,
-    "lr": 1e-3,
+    "variant": "V",
+    # fusion / calibration
+    "reliability_temperature": 0.1,
+    "visual_temperature": 1.0,
+    # optimization (Stage-2 visual head defaults, updated from experiments)
+    "lr": 0.01,
     "weight_decay": 0.0,
-    "epochs": 100,
-    "batch_size": 512,
+    "epochs": 50,
+    "batch_size": 256,
+    "cos_lr": False,
     "extract_batch_size": 128,
     "seeds": [1, 2, 3],
     "lt_loss": "CE",

@@ -25,12 +25,15 @@ from biomedclip_ltc.losses import get_loss
 from biomedclip_ltc.model import VisualHead
 
 
+# short loss tags so visual-only runs are NOT mislabeled with a text scheme
+LOSS_ABBR = {"CE": "CE", "BalancedSoftmax": "BS", "LogitAdjust": "LA"}
+
+
 def build_run_name(cfg, variant):
     bm = cfgmod.bm
-    return (f"{variant}_{bm(cfg, 'text_scheme')}_seed{cfg.general.seed}"
-            f"_lr{bm(cfg, 'lr')}_bs{bm(cfg, 'batch_size')}"
-            f"_ep{bm(cfg, 'epochs')}_wd{bm(cfg, 'weight_decay')}"
-            f"_{bm(cfg, 'lt_loss')}")
+    loss = LOSS_ABBR.get(bm(cfg, "lt_loss"), bm(cfg, "lt_loss"))
+    return (f"{variant}_{loss}_seed{cfg.general.seed}"
+            f"_lr{bm(cfg, 'lr')}_bs{bm(cfg, 'batch_size')}_ep{bm(cfg, 'epochs')}")
 
 
 def run_dir(cfg, variant):
@@ -110,8 +113,9 @@ def main():
     if hasattr(criterion, "to"):
         criterion = criterion.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+    use_cos = args.cos_lr or bool(cfgmod.bm(cfg, "cos_lr"))
     scheduler = (torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs, eta_min=0.0)
-                 if args.cos_lr else None)
+                 if use_cos else None)
 
     # config snapshot (with seed + cls counts)
     utils.save_json(os.path.join(out, "config_snapshot.json"), {

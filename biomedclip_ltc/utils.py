@@ -43,6 +43,11 @@ def ensure_dir(path):
     return path
 
 
+def method_dir(dataset, name):
+    """Standard output directory for a method run: outputs/biomedclip_ltc/<ds>/<name>."""
+    return os.path.join("outputs", "biomedclip_ltc", dataset, name)
+
+
 def save_json(path, obj):
     ensure_dir(os.path.dirname(path))
     with open(path, "w") as f:
