@@ -31,7 +31,7 @@ biomedclip:
   text_scheme: 'P1'          # P0 name-only | P1 modality template | P2 fine-grained clinical (Plan B)
   extract_batch_size: 128
   variant: 'V'
-  reliability_temperature: 0.1
+  reliability_temperature: 1.0
   visual_temperature: 1.0
   lr: 0.01
   weight_decay: 0.0

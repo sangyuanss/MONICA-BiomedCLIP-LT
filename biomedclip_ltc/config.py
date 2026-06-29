@@ -22,7 +22,7 @@ _DEFAULTS = {
     "text_scheme": "P1",             # P0 name-only | P1 modality template | P2 fine-grained clinical
     "variant": "V",
     # fusion / calibration
-    "reliability_temperature": 0.1,
+    "reliability_temperature": 1.0,
     "visual_temperature": 1.0,
     # optimization (Stage-2 visual head defaults, updated from experiments)
     "lr": 0.01,

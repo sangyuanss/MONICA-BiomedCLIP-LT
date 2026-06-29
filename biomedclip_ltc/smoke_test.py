@@ -122,6 +122,12 @@ biomedclip:
             vt = f"{smoke_out}/VT_{mode}_P1_seed1"
             for f in ("selected_fusion.json", "val_results.json", "test_results.json"):
                 assert os.path.exists(os.path.join(vt, f)), f"{mode}: missing {f}"
+            if mode == "adaptive":
+                sys.argv = ["evaluate_fusion", "--config", yml,
+                            "--load-best-config",
+                            os.path.join(vt, "selected_fusion.json"),
+                            "--eval-split", "test"]
+                evaluate_fusion.main()
 
         print(f"\nSMOKE TEST PASSED — visual test groupAvgAcc={avg:.2f} "
               f"(chance≈{100.0/C:.1f}); text + 4 fusion modes ran end-to-end.")

@@ -88,21 +88,40 @@ Outputs to `outputs/biomedclip_ltc/<ds>/T_<scheme>/`:
 ```bash
 python -m biomedclip_ltc.text_reliability --config biomedclip_ltc/configs/isic_100.yml --all
 ```
-Saves `<proto_root>/<ds>_text_reliability_<scheme>.json` (reliability vector, raw
-margins, and the full class×class similarity matrix for heatmaps).
+Uses the Stage-3 selected text temperature by default. Saves
+`<proto_root>/<ds>_text_reliability_<scheme>.json`,
+`<proto_root>/<ds>_class_reliability_<scheme>.pt`, and
+`<proto_root>/<ds>_reliability_metadata_<scheme>.json`.
 
 ## Stage 4 & 5 — visual+text fusion (four ablation modes)
 
 ```bash
 VRUN=outputs/biomedclip_ltc/isic/V_CE_seed1_lr0.01_bs256_ep50   # Stage-2 run dir
-for m in fixed uncertainty_only reliability_only adaptive; do
-  python -m biomedclip_ltc.evaluate_fusion --config biomedclip_ltc/configs/isic_100.yml \
-      --mode $m --text-scheme P1 --visual-run-dir $VRUN --test
+mkdir -p logs/fusion_grid
+for s in P0 P1 P2; do
+  for m in fixed uncertainty_only reliability_only adaptive; do
+    python -u -m biomedclip_ltc.evaluate_fusion \
+      --config biomedclip_ltc/configs/isic_100.yml \
+      --mode $m --text-scheme $s --visual-run-dir $VRUN \
+      2>&1 | tee logs/fusion_grid/${s}_${m}.log
+  done
 done
 ```
-`fixed` searches alpha∈[0..1]; the others search lambda∈[0.1,0.25,0.5,1,2,5].
+`fixed` searches alpha in `[0, 1]`; gated modes search lambda in `[0, 1]`.
 Outputs to `VT_<mode>_<scheme>_seed<seed>/`: `selected_fusion.json`,
-`val_results.json`, `per_class_val.json`, `test_results.json`.
+`val_results.json`, `per_class_val.json`, and `val_diagnostics.csv`.
+
+Updated protocol: gated modes now search lambda in `[0, 1]`, normalize the raw
+gate by its validation mean, clip with `alpha_max=1.0`, and write
+`val_diagnostics.csv`. For the strict final test, load the saved validation
+configuration instead of searching again:
+
+```bash
+python -u -m biomedclip_ltc.evaluate_fusion \
+  --config biomedclip_ltc/configs/isic_100.yml \
+  --load-best-config outputs/biomedclip_ltc/isic/VT_adaptive_P1_seed1/selected_fusion.json \
+  --eval-split test
+```
 
 ## Full method list (debug on seed=1; final report seeds 1,2,3 mean±std)
 
