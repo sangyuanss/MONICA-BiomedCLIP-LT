@@ -123,17 +123,25 @@ python -u -m biomedclip_ltc.evaluate_fusion \
   --eval-split test
 ```
 
-Probability-domain low-cost ablations (no retraining): `prob_fixed`, `prob_G`,
-`prob_Q`, `prob_R`, `prob_GQ`, `prob_GR`, `prob_QR`, `prob_GQR`. These mix
-`softmax(z_v/Tv)` and `softmax(z_t/Tt)` with a sample-class gate. `G` is
-validation-quantile visual uncertainty, `Q` is train-count tail need, and `R` is
-train-only text reliability. Selection ranks candidates that keep AUROC/AUPRC
-within 1 point of the visual validation baseline ahead of candidates that do not.
+Probability-domain low-cost ablations (no full retraining): the current paper
+experiment focuses on `prob_fixed`, `prob_G`, `prob_B`, and `prob_GB`. These mix
+`softmax(z_v/Tv)` and `softmax(z_t/Tt)` with a bounded sample-class gate. `G` is
+validation-quantile visual uncertainty; `B` is a train-only out-of-fold estimate
+of the actual class-level text benefit. Selection ranks candidates that keep
+AUROC/AUPRC within 1 point of the visual validation baseline ahead of candidates
+that do not.
 
 ```bash
 mkdir -p logs/fusion_prob
-for s in P0 P1 P2; do
-  for m in prob_fixed prob_G prob_Q prob_R prob_GQ prob_GR prob_QR prob_GQR; do
+for s in P0 P1; do
+  python -u -m biomedclip_ltc.text_benefit \
+    --config biomedclip_ltc/configs/isic_100.yml \
+    --visual-run-dir $VRUN \
+    --text-scheme $s \
+    --folds 5 \
+    --benefit-kappa 0.5
+
+  for m in prob_fixed prob_G prob_B prob_GB; do
     python -u -m biomedclip_ltc.evaluate_fusion \
       --config biomedclip_ltc/configs/isic_100.yml \
       --mode $m --text-scheme $s --visual-run-dir $VRUN \
@@ -141,6 +149,10 @@ for s in P0 P1 P2; do
   done
 done
 ```
+
+Older Q/R probability modes (`prob_Q`, `prob_R`, `prob_GQ`, `prob_GR`,
+`prob_QR`, `prob_GQR`) are still importable and runnable for reproducing the
+previous long-tail/reliability ablations.
 
 ## Full method list (debug on seed=1; final report seeds 1,2,3 mean±std)
 
