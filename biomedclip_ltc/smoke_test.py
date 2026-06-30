@@ -62,6 +62,37 @@ def _assert_benefit_smoke(path, train_size):
                for r in rows)
 
 
+def _assert_sample_gate_smoke():
+    B = torch.tensor([0.0, 0.0, 0.2, 0.9])
+    p_text_high = torch.tensor([[0.02, 0.03, 0.05, 0.90]])
+    p_text_low = torch.tensor([[0.90, 0.05, 0.03, 0.02]])
+    S_high = evaluate_fusion.compute_sample_text_benefit(p_text_high, B)
+    S_low = evaluate_fusion.compute_sample_text_benefit(p_text_low, B)
+    assert S_high.shape == (1, 1)
+    assert S_low.shape == (1, 1)
+    assert S_high.item() > S_low.item()
+
+    p_v = torch.softmax(torch.randn(4, C), dim=1)
+    p_t = torch.softmax(torch.randn(4, C), dim=1)
+    S = evaluate_fusion.compute_sample_text_benefit(p_t, torch.rand(C))
+    alpha = 0.3 * S
+    assert alpha.shape == (4, 1)
+    assert alpha.shape != (4, C)
+
+    zero_alpha = torch.zeros(4, 1)
+    p_fused_zero = evaluate_fusion.fuse_probabilities_with_sample_gate(
+        p_v, p_t, zero_alpha)
+    assert torch.allclose(p_fused_zero, p_v, atol=1e-7)
+
+    p_fused = evaluate_fusion.fuse_probabilities_with_sample_gate(p_v, p_t, alpha)
+    assert torch.allclose(p_fused.sum(dim=1), torch.ones(4), atol=1e-6)
+
+    class_alpha = evaluate_fusion.build_prob_alpha(
+        "prob_GB", 4, C, 0.2, gate=torch.ones(4), benefit=torch.ones(C),
+        device=p_v.device)
+    assert class_alpha.shape == (4, C)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="biomedclip_smoke_")
     feat_root = os.path.join(tmp, "features")
@@ -149,6 +180,7 @@ biomedclip:
         text_benefit.main()
         benefit_json = os.path.join(run_dir, "text_benefit_P1.json")
         _assert_benefit_smoke(benefit_json, sizes["train"])
+        _assert_sample_gate_smoke()
 
         logp = evaluate_fusion.prob_scores(
             torch.randn(5, C), torch.randn(5, C), torch.full((5, C), 0.3),
@@ -175,6 +207,9 @@ biomedclip:
             ("prob_B", ["--alpha-maxes", "0.2", "--tau-Bs", "0.5"]),
             ("prob_GB", ["--alpha-maxes", "0.2", "--etas", "0.5",
                          "--tau-Bs", "0.5"]),
+            ("prob_B_sample", ["--alpha-maxes", "0.0,0.2", "--tau-Bs", "0.5"]),
+            ("prob_GB_sample", ["--alpha-maxes", "0.0,0.2", "--etas", "0.5",
+                                "--tau-Bs", "0.5"]),
             ("prob_GQR", ["--alpha-maxes", "0.2", "--gammas", "0.5",
                           "--etas", "0.5"]),
         ]
@@ -186,10 +221,18 @@ biomedclip:
             vt = f"{smoke_out}/VT_{mode}_P1_seed1"
             for f in ("selected_fusion.json", "val_results.json", "test_results.json"):
                 assert os.path.exists(os.path.join(vt, f)), f"{mode}: missing {f}"
-            if mode in ("prob_B", "prob_GB"):
+            if mode in ("prob_B", "prob_GB", "prob_B_sample", "prob_GB_sample"):
                 assert os.path.exists(os.path.join(vt, "val_class_diagnostics.csv"))
+            if mode in ("prob_B_sample", "prob_GB_sample"):
+                selected = utils.load_json(os.path.join(vt, "selected_fusion.json"))
+                assert selected["selected"]["benefit_application"] == "sample_expectation"
+                with open(os.path.join(vt, "val_diagnostics.csv"), newline="") as f:
+                    header = next(csv.reader(f))
+                for col in ("sample_text_confidence", "sample_alpha",
+                            "text_top_class", "text_top_probability", "B_true"):
+                    assert col in header, f"{mode}: missing diagnostic column {col}"
 
-        vt = f"{smoke_out}/VT_prob_GB_P1_seed1"
+        vt = f"{smoke_out}/VT_prob_GB_sample_P1_seed1"
         sys.argv = ["evaluate_fusion", "--config", yml,
                     "--load-best-config", os.path.join(vt, "selected_fusion.json"),
                     "--eval-split", "test"]

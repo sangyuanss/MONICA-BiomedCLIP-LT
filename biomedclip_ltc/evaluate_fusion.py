@@ -13,15 +13,17 @@ Class reliability is estimated from TRAIN only by text_reliability.py. The test
 split can be evaluated either after a validation search with --test (legacy
 debug convenience) or strictly with --eval-split test --load-best-config.
 
-Probability-domain modes mix calibrated visual/text probabilities with a
-sample-class gate:
+Probability-domain class-channel modes mix calibrated visual/text probabilities
+with a sample-class gate:
 
     a_ic = alpha_max * G_i * B_c * Q_c * R_c
     p_hat_ic = (1 - a_ic) * p_v_ic + a_ic * p_t_ic
     p_fuse = normalize(p_hat)
 
-The new experiment focuses on prob_fixed/prob_G/prob_B/prob_GB. Q/R modes stay
-available for reproducing the previous long-tail/reliability ablations.
+The sample-benefit diagnostic modes first convert B_c to a scalar sample text
+confidence S_i = sum_c p_text_ic * B_c, then use a sample-level gate [N,1].
+Old Q/R and class-channel B modes stay available for reproducing previous
+ablations.
 """
 import argparse
 import csv
@@ -41,12 +43,13 @@ from biomedclip_ltc.model import VisualHead
 
 DEFAULT_ALPHAS = [round(0.1 * i, 1) for i in range(11)]
 DEFAULT_LAMBDAS = [round(0.1 * i, 1) for i in range(11)]
-DEFAULT_PROB_ALPHA_MAXES = [0.1, 0.2, 0.3, 0.4]
+DEFAULT_PROB_ALPHA_MAXES = [0.0, 0.1, 0.2, 0.3, 0.4]
 DEFAULT_GAMMAS = [0.0, 0.25, 0.5, 1.0]
 DEFAULT_ETAS = [0.0, 0.5, 1.0]
 DEFAULT_TAU_BS = [0.25, 0.5, 1.0]
 PROB_MODES = (
     "prob_fixed", "prob_G", "prob_B", "prob_GB",
+    "prob_B_sample", "prob_GB_sample",
     "prob_Q", "prob_R", "prob_GQ", "prob_GR", "prob_QR", "prob_GQR",
 )
 ALL_MODES = tuple(calibration.MODES) + PROB_MODES
@@ -80,6 +83,10 @@ def need_benefit(mode):
     return is_prob_mode(mode) and prob_uses_gate(mode, "B")
 
 
+def is_sample_benefit_mode(mode):
+    return mode in ("prob_B_sample", "prob_GB_sample")
+
+
 def benefit_vector_from_obj(benefit_obj, tau_B):
     return tbmod.benefit_from_conservative_gain(
         benefit_obj["class_conservative_gain"], tau_B)
@@ -103,6 +110,45 @@ def prob_scores(visual_logits, text_logits, alpha_ic, Tv, Tt, eps=1e-8):
     p_hat = (1.0 - alpha_ic) * p_v + alpha_ic * p_t
     p_fuse = p_hat / p_hat.sum(dim=1, keepdim=True).clamp_min(eps)
     return p_fuse.clamp_min(eps).log()
+
+
+def compute_sample_text_benefit(text_probs, class_benefit):
+    """Convert class-level benefit B_c into sample-level text confidence S_i."""
+    if text_probs.ndim != 2:
+        raise ValueError(f"text_probs must have shape [N, C], got {text_probs.shape}")
+    if class_benefit.ndim != 1:
+        raise ValueError(
+            f"class_benefit must have shape [C], got {class_benefit.shape}")
+    if text_probs.shape[1] != class_benefit.shape[0]:
+        raise ValueError(
+            "Class count mismatch: "
+            f"text_probs has {text_probs.shape[1]} classes, "
+            f"class_benefit has {class_benefit.shape[0]}")
+    benefit = class_benefit.to(
+        device=text_probs.device, dtype=text_probs.dtype).view(1, -1)
+    sample_confidence = (text_probs * benefit).sum(dim=1, keepdim=True)
+    return sample_confidence.clamp(0.0, 1.0)
+
+
+def fuse_probabilities_with_sample_gate(visual_probs, text_probs, sample_alpha,
+                                        eps=1e-12):
+    """Probability-domain fusion with one scalar gate per sample."""
+    if visual_probs.shape != text_probs.shape:
+        raise ValueError(
+            "visual_probs and text_probs must have identical shapes, "
+            f"got {visual_probs.shape} and {text_probs.shape}")
+    if sample_alpha.ndim == 1:
+        sample_alpha = sample_alpha.view(-1, 1)
+    expected_shape = (visual_probs.shape[0], 1)
+    if tuple(sample_alpha.shape) != expected_shape:
+        raise ValueError(
+            f"sample_alpha must have shape {expected_shape}, "
+            f"got {tuple(sample_alpha.shape)}")
+    sample_alpha = sample_alpha.to(
+        device=visual_probs.device, dtype=visual_probs.dtype).clamp(0.0, 1.0)
+    fused = (1.0 - sample_alpha) * visual_probs + sample_alpha * text_probs
+    fused = fused.clamp_min(eps)
+    return fused / fused.sum(dim=1, keepdim=True).clamp_min(eps)
 
 
 def uncertainty_components(visual_logits, temperature=1.0, eps=1e-8):
@@ -265,6 +311,33 @@ def alpha_stats(alpha):
     }
 
 
+def summarize_tensor(x):
+    x = x.detach().float().cpu().view(-1)
+    return {
+        "min": float(x.min()),
+        "q25": float(torch.quantile(x, 0.25)),
+        "median": float(torch.quantile(x, 0.50)),
+        "mean": float(x.mean()),
+        "q75": float(torch.quantile(x, 0.75)),
+        "max": float(x.max()),
+        "nonzero_ratio": float((x > 1e-8).float().mean()),
+    }
+
+
+def prob_summary_payload(benefit=None, sample_confidence=None, gate=None,
+                         alpha=None):
+    payload = {}
+    if benefit is not None:
+        payload["B_summary"] = summarize_tensor(benefit)
+    if sample_confidence is not None:
+        payload["S_summary"] = summarize_tensor(sample_confidence)
+    if gate is not None:
+        payload["G_summary"] = summarize_tensor(gate)
+    if alpha is not None:
+        payload["alpha_summary"] = summarize_tensor(alpha)
+    return payload
+
+
 def make_alpha(mode, selected, n, u, s, alpha_max):
     if mode == "fixed":
         alpha, gate_mean = calibration.fusion_alpha(
@@ -280,16 +353,22 @@ def make_alpha(mode, selected, n, u, s, alpha_max):
 
 def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, s,
                      alpha, gate=None, tail_need=None, class_rel=None,
-                     benefit=None, visual_entropy=None, visual_margin=None):
+                     benefit=None, visual_entropy=None, visual_margin=None,
+                     sample_text_confidence=None, text_probs=None):
     utils.ensure_dir(os.path.dirname(path))
     if not torch.is_tensor(alpha):
         alpha = torch.full((labels.shape[0],), float(alpha))
     v_pred = visual_logits.argmax(dim=1)
     t_pred = text_logits.argmax(dim=1)
     f_pred = fused_logits.argmax(dim=1)
-    alpha_is_matrix = alpha.dim() == 2
+    alpha_is_class_matrix = alpha.dim() == 2 and alpha.shape[1] > 1
     if visual_entropy is None or visual_margin is None:
         visual_entropy, visual_margin = uncertainty_components(visual_logits)
+    if text_probs is None:
+        text_probs = F.softmax(text_logits, dim=1)
+    text_top = text_probs.argmax(dim=1)
+    text_top_prob = text_probs.gather(1, text_top[:, None]).squeeze(1)
+    benefit_for_diag = benefit.to(labels.device) if benefit is not None else None
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "sample_index", "index", "label",
@@ -297,6 +376,8 @@ def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, 
             "visual_prediction", "text_prediction", "fusion_prediction",
             "visual_correct", "text_correct", "fused_correct",
             "G", "B_text_top", "B_visual_top", "B_fused_top",
+            "B_true", "text_top_class", "text_top_probability",
+            "sample_text_confidence", "sample_alpha",
             "alpha_mean", "alpha_max_sample", "visual_entropy", "visual_margin",
             "visual_uncertainty",
             "sample_text_reliability", "visual_gate",
@@ -306,14 +387,22 @@ def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, 
         writer.writeheader()
         for i in range(labels.shape[0]):
             fp = int(f_pred[i])
-            if alpha_is_matrix:
+            if alpha_is_class_matrix:
                 alpha_mean = float(alpha[i].mean())
                 alpha_fp = float(alpha[i, fp])
                 alpha_max_sample = float(alpha[i].max())
+                sample_alpha = alpha_mean
+            elif alpha.dim() == 2:
+                alpha_mean = float(alpha[i, 0])
+                alpha_fp = float(alpha[i, 0])
+                alpha_max_sample = float(alpha[i, 0])
+                sample_alpha = float(alpha[i, 0])
             else:
                 alpha_mean = float(alpha[i])
                 alpha_fp = float(alpha[i])
                 alpha_max_sample = float(alpha[i])
+                sample_alpha = float(alpha[i])
+            txt_top = int(text_top[i])
             writer.writerow({
                 "sample_index": i,
                 "index": i,
@@ -328,9 +417,15 @@ def save_diagnostics(path, labels, visual_logits, text_logits, fused_logits, u, 
                 "text_correct": int(t_pred[i] == labels[i]),
                 "fused_correct": int(f_pred[i] == labels[i]),
                 "G": "" if gate is None else float(gate[i]),
-                "B_text_top": "" if benefit is None else float(benefit[int(t_pred[i])]),
-                "B_visual_top": "" if benefit is None else float(benefit[int(v_pred[i])]),
-                "B_fused_top": "" if benefit is None else float(benefit[fp]),
+                "B_text_top": "" if benefit_for_diag is None else float(benefit_for_diag[txt_top]),
+                "B_visual_top": "" if benefit_for_diag is None else float(benefit_for_diag[int(v_pred[i])]),
+                "B_fused_top": "" if benefit_for_diag is None else float(benefit_for_diag[fp]),
+                "B_true": "" if benefit_for_diag is None else float(benefit_for_diag[int(labels[i])]),
+                "text_top_class": txt_top,
+                "text_top_probability": float(text_top_prob[i]),
+                "sample_text_confidence": "" if sample_text_confidence is None
+                else float(sample_text_confidence[i].view(-1)[0]),
+                "sample_alpha": sample_alpha,
                 "alpha_mean": alpha_mean,
                 "alpha_max_sample": alpha_max_sample,
                 "visual_entropy": float(visual_entropy[i]),
@@ -385,19 +480,32 @@ def run_prob_eval_split(cfg, split, mode, scheme, selected, head, protos,
         if benefit_obj is None:
             benefit_obj = tbmod.load_benefit(selected["benefit_file"])
         benefit = benefit_vector_from_obj(benefit_obj, selected["tau_B"])
-    alpha = build_prob_alpha(
-        mode, labels.shape[0], cfg.general.num_classes, selected["alpha_max"],
-        gate=gate, tail_need=tail_need, class_rel=class_rel,
-        benefit=benefit, device=v.device)
-    scores = prob_scores(v, t, alpha, selected["Tv"], selected["Tt"])
+    p_v = F.softmax(v / float(selected["Tv"]), dim=1)
+    p_t = F.softmax(t / float(selected["Tt"]), dim=1)
+    sample_confidence = None
+    if is_sample_benefit_mode(mode) or selected.get("benefit_application") == "sample_expectation":
+        sample_confidence = compute_sample_text_benefit(p_t, benefit)
+        alpha = float(selected["alpha_max"]) * sample_confidence
+        if prob_uses_gate(mode, "G"):
+            alpha = alpha * gate.to(v.device)[:, None]
+        p_fused = fuse_probabilities_with_sample_gate(p_v, p_t, alpha)
+        scores = p_fused.clamp_min(1e-12).log()
+    else:
+        alpha = build_prob_alpha(
+            mode, labels.shape[0], cfg.general.num_classes, selected["alpha_max"],
+            gate=gate, tail_need=tail_need, class_rel=class_rel,
+            benefit=benefit, device=v.device)
+        scores = prob_scores(v, t, alpha, selected["Tv"], selected["Tt"])
     res = metricsmod.evaluate_logits(cfg, scores, labels)
     print(metricsmod.format_summary(res, split.upper()))
     sample_rel = (calibration.sample_text_reliability(t, class_rel, selected["Tt"])
                   if class_rel is not None else None)
+    summaries = prob_summary_payload(benefit, sample_confidence, gate, alpha)
     save_diagnostics(os.path.join(out, f"{split}_diagnostics.csv"),
                      labels, v, t, scores, U, sample_rel, alpha,
                      gate=gate, tail_need=tail_need, class_rel=class_rel,
-                     benefit=benefit, visual_entropy=ent_u, visual_margin=margin_u)
+                     benefit=benefit, visual_entropy=ent_u, visual_margin=margin_u,
+                     sample_text_confidence=sample_confidence, text_probs=p_t)
     if benefit_obj is not None and benefit is not None:
         save_benefit_class_diagnostics(
             os.path.join(out, f"{split}_class_diagnostics.csv"),
@@ -409,6 +517,7 @@ def run_prob_eval_split(cfg, split, mode, scheme, selected, head, protos,
         **selected,
         split: metricsmod.results_to_jsonable(res),
         "alpha_stats": alpha_stats(alpha),
+        **summaries,
     }
     utils.save_json(os.path.join(out, f"{split}_results.json"), payload)
     return res, alpha
@@ -423,10 +532,10 @@ def selection_key(rec):
     if not rec.get("passes_constraints", True):
         return (0, -float(rec.get("constraint_loss", 0.0)),
                 rec["group_avg_acc"], rec["tail_acc"], rec["macro_f1"],
-                rec["auprc"], rec["auroc"])
+                rec["auprc"], rec["auroc"], -float(rec.get("alpha_max", 0.0)))
     return (1 if rec.get("passes_constraints", True) else 0,
             rec["group_avg_acc"], rec["tail_acc"], rec["macro_f1"],
-            rec["auprc"], rec["auroc"])
+            rec["auprc"], rec["auroc"], -float(rec.get("alpha_max", 0.0)))
 
 
 def constraint_loss(rec, visual_rec):
@@ -598,6 +707,7 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
     uses_B = prob_uses_gate(mode, "B")
     uses_Q = prob_uses_gate(mode, "Q")
     uses_R = prob_uses_gate(mode, "R")
+    uses_sample_B = is_sample_benefit_mode(mode)
     if uses_B and benefit_obj is None:
         raise SystemExit(f"{mode} requires a text benefit file. Run text_benefit first.")
     benefit_file = None
@@ -623,6 +733,8 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
         visual_rec = metric_record(visual_res)
         p_v_res = metricsmod.format_summary(visual_res, "visual-val")
         print("  baseline " + p_v_res)
+        p_v = F.softmax(va_v / float(Tv), dim=1)
+        p_t = F.softmax(va_t / float(Tt), dim=1)
         for eta in eta_grid:
             U = combined_uncertainty(va_v, Tv, eta)
             if uses_G:
@@ -634,12 +746,23 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                 for tau_B in tau_B_grid:
                     B = benefit_vector_from_obj(benefit_obj, tau_B) if uses_B else None
                     for alpha_max in alpha_maxes:
-                        alpha = build_prob_alpha(
-                            mode, n_val, C, alpha_max, gate=G, tail_need=Q,
-                            class_rel=class_rel if uses_R else None,
-                            benefit=B, device=va_v.device)
-                        scores = prob_scores(va_v, va_t, alpha, Tv, Tt)
+                        S = None
+                        if uses_sample_B:
+                            S = compute_sample_text_benefit(p_t, B)
+                            alpha = float(alpha_max) * S
+                            if uses_G:
+                                alpha = alpha * G.to(va_v.device)[:, None]
+                            p_fused = fuse_probabilities_with_sample_gate(
+                                p_v, p_t, alpha)
+                            scores = p_fused.clamp_min(1e-12).log()
+                        else:
+                            alpha = build_prob_alpha(
+                                mode, n_val, C, alpha_max, gate=G, tail_need=Q,
+                                class_rel=class_rel if uses_R else None,
+                                benefit=B, device=va_v.device)
+                            scores = prob_scores(va_v, va_t, alpha, Tv, Tt)
                         res = metricsmod.evaluate_logits(cfg, scores, labels)
+                        summaries = prob_summary_payload(B, S, G, alpha)
                         rec = {
                             "Tv": Tv,
                             "Tt": Tt,
@@ -650,6 +773,11 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "benefit_kappa": (benefit_obj.get("benefit_kappa")
                                               if benefit_obj is not None else None),
                             "benefit_file": benefit_file,
+                            "benefit_application": ("sample_expectation"
+                                                    if uses_sample_B else
+                                                    ("class_channel" if uses_B else None)),
+                            "sample_confidence_formula": ("sum_c p_text_ic * B_c"
+                                                          if uses_sample_B else None),
                             "tau_low": tau_low,
                             "tau_high": tau_high,
                             "uncertainty_q_low": q_low if uses_G else None,
@@ -659,6 +787,7 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "visual_val_group_avg_acc": visual_rec["group_avg_acc"],
                             "visual_val_auroc": visual_rec["auroc"],
                             "visual_val_auprc": visual_rec["auprc"],
+                            **summaries,
                         }
                         rec["constraint_loss"] = constraint_loss(rec, visual_rec)
                         rec["passes_constraints"] = passes_selection_constraints(
@@ -682,6 +811,8 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "benefit_kappa": (benefit_obj.get("benefit_kappa")
                                               if benefit_obj is not None else None),
                             "benefit_file": rec["benefit_file"],
+                            "benefit_application": rec["benefit_application"],
+                            "sample_confidence_formula": rec["sample_confidence_formula"],
                             "tau_low": tau_low,
                             "tau_high": tau_high,
                             "uncertainty_q_low": q_low if uses_G else None,
@@ -690,15 +821,19 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "selection_auprc_drop": args.selection_auprc_drop,
                         }
                         if best is None or key > best[0]:
-                            best = (key, selected, res, alpha, U, G, Q, B, scores, rec)
+                            best = (key, selected, res, alpha, U, G, Q, B, S,
+                                    scores, rec, p_t)
 
-    _, selected, va_res, va_alpha, va_U, va_G, va_Q, va_B, va_scores, best_rec = best
+    _, selected, va_res, va_alpha, va_U, va_G, va_Q, va_B, va_S, va_scores, best_rec, va_p_t = best
     if not best_rec["passes_constraints"]:
         print("[fusion][warn] no probability-fusion candidate passed AUROC/AUPRC "
               "constraints; selected the best fallback by the same ranking.")
     drop_count = sum(1 for rec in search if not rec["passes_constraints"])
     print(f"[fusion] selected {selected} | " +
           metricsmod.format_summary(va_res, "val(best)"))
+    for name in ("B_summary", "S_summary", "G_summary", "alpha_summary"):
+        if name in best_rec:
+            print(f"[fusion] {name}={best_rec[name]}")
 
     out = utils.ensure_dir(utils.method_dir(
         cfg.general.dataset_name, f"VT_{mode}_{scheme}_seed{seed}"))
@@ -717,6 +852,8 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
         "search": search,
         "val_group_avg_acc": metricsmod.group_avg_acc(va_res),
         "alpha_stats": alpha_stats(va_alpha),
+        **{k: best_rec[k] for k in ("B_summary", "S_summary", "G_summary",
+                                    "alpha_summary") if k in best_rec},
         "passes_constraints": best_rec["passes_constraints"],
         "selection_drop_count": drop_count,
         "selection_total_count": len(search),
@@ -733,6 +870,8 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
         **selected,
         "val": metricsmod.results_to_jsonable(va_res),
         "alpha_stats": alpha_stats(va_alpha),
+        **{k: best_rec[k] for k in ("B_summary", "S_summary", "G_summary",
+                                    "alpha_summary") if k in best_rec},
         "passes_constraints": best_rec["passes_constraints"],
     })
     utils.save_json(os.path.join(out, "per_class_val.json"), {
@@ -746,7 +885,8 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                      labels, va_v, va_t, va_scores, va_U, sample_rel, va_alpha,
                      gate=va_G, tail_need=va_Q, class_rel=class_rel,
                      benefit=va_B, visual_entropy=va_ent,
-                     visual_margin=va_margin)
+                     visual_margin=va_margin,
+                     sample_text_confidence=va_S, text_probs=va_p_t)
     if benefit_obj is not None and va_B is not None:
         save_benefit_class_diagnostics(
             os.path.join(out, "val_class_diagnostics.csv"),
