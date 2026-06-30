@@ -15,13 +15,14 @@ import os
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 from biomedclip_ltc import (calibration, evaluate_fusion, evaluate_test,
-                            evaluate_text, text_benefit, text_reliability,
-                            train, utils)
+                            evaluate_text, metrics as metricsmod, text_benefit,
+                            text_reliability, train, utils)
 
 C, D, IR = 6, 64, 999
 HEAD, MEDIUM = 2, 4
@@ -91,6 +92,57 @@ def _assert_sample_gate_smoke():
         "prob_GB", 4, C, 0.2, gate=torch.ones(4), benefit=torch.ones(C),
         device=p_v.device)
     assert class_alpha.shape == (4, C)
+
+    class_zero = evaluate_fusion.build_prob_alpha(
+        "prob_fixed", 4, C, 0.0, device=p_v.device)
+    p_fused_class_zero = evaluate_fusion.fuse_probabilities_with_class_gate(
+        p_v, p_t, class_zero)
+    torch.testing.assert_close(p_fused_class_zero, p_v, rtol=1e-6, atol=1e-7)
+
+
+def _assert_probability_selection_baseline_smoke():
+    cfg = SimpleNamespace(
+        general=SimpleNamespace(num_classes=3),
+        datasets=SimpleNamespace(head=1, medium=2),
+    )
+    labels = torch.tensor([0, 1, 2, 0, 1, 2, 0, 1, 2])
+    logits = torch.tensor([
+        [-2.8242, 3.7897, -0.5513],
+        [0.4515, 0.3225, -0.8341],
+        [-7.8064, 1.8734, -2.6051],
+        [-0.6152, 1.1927, 0.8966],
+        [-2.4359, 1.3633, 5.4986],
+        [-4.0103, -1.4446, 3.7303],
+        [7.1080, 4.3008, 6.7695],
+        [-2.0882, -3.8305, -4.3740],
+        [-2.0844, -3.9558, -2.9082],
+    ])
+    logit_rec = evaluate_fusion.metric_record(
+        metricsmod.evaluate_logits(cfg, logits, labels))
+    p_v = torch.softmax(logits, dim=1)
+    prob_rec = evaluate_fusion.metric_record(
+        metricsmod.evaluate_logits(cfg, p_v.clamp_min(1e-8).log(), labels))
+    assert abs(logit_rec["auroc"] - prob_rec["auroc"]) > 1e-6
+    assert abs(logit_rec["auprc"] - prob_rec["auprc"]) > 1e-6
+
+    candidate = {
+        "auroc": logit_rec["auroc"] - 0.3,
+        "auprc": prob_rec["auprc"],
+        "group_avg_acc": prob_rec["group_avg_acc"],
+        "tail_acc": prob_rec["tail_acc"],
+        "macro_f1": prob_rec["macro_f1"],
+        "alpha_max": 0.2,
+    }
+    would_pass_logit = evaluate_fusion.passes_selection_constraints(
+        candidate, logit_rec, auroc_drop=1.0, auprc_drop=1.0)
+    evaluate_fusion.add_selection_constraint_fields(
+        candidate, prob_rec, auroc_drop=1.0, auprc_drop=1.0,
+        baseline_domain="probability")
+    assert would_pass_logit is True
+    assert candidate["passes_constraints"] is False
+    assert candidate["selection_baseline_domain"] == "probability"
+    assert candidate["selection_baseline_auroc"] == prob_rec["auroc"]
+    assert candidate["selection_baseline_auprc"] == prob_rec["auprc"]
 
 
 def main():
@@ -181,6 +233,7 @@ biomedclip:
         benefit_json = os.path.join(run_dir, "text_benefit_P1.json")
         _assert_benefit_smoke(benefit_json, sizes["train"])
         _assert_sample_gate_smoke()
+        _assert_probability_selection_baseline_smoke()
 
         logp = evaluate_fusion.prob_scores(
             torch.randn(5, C), torch.randn(5, C), torch.full((5, C), 0.3),
@@ -202,7 +255,7 @@ biomedclip:
                 evaluate_fusion.main()
 
         prob_runs = [
-            ("prob_fixed", ["--alpha-maxes", "0.2,0.4"]),
+            ("prob_fixed", ["--alpha-maxes", "0.0,0.2,0.4"]),
             ("prob_G", ["--alpha-maxes", "0.2", "--etas", "0.5"]),
             ("prob_B", ["--alpha-maxes", "0.2", "--tau-Bs", "0.5"]),
             ("prob_GB", ["--alpha-maxes", "0.2", "--etas", "0.5",
@@ -221,10 +274,14 @@ biomedclip:
             vt = f"{smoke_out}/VT_{mode}_P1_seed1"
             for f in ("selected_fusion.json", "val_results.json", "test_results.json"):
                 assert os.path.exists(os.path.join(vt, f)), f"{mode}: missing {f}"
+            selected = utils.load_json(os.path.join(vt, "selected_fusion.json"))
+            assert selected["selection_baseline_domain"] == "probability"
+            for key in ("selection_baseline_auroc", "selection_baseline_auprc",
+                        "selection_auroc_threshold", "selection_auprc_threshold"):
+                assert key in selected, f"{mode}: missing {key}"
             if mode in ("prob_B", "prob_GB", "prob_B_sample", "prob_GB_sample"):
                 assert os.path.exists(os.path.join(vt, "val_class_diagnostics.csv"))
             if mode in ("prob_B_sample", "prob_GB_sample"):
-                selected = utils.load_json(os.path.join(vt, "selected_fusion.json"))
                 assert selected["selected"]["benefit_application"] == "sample_expectation"
                 with open(os.path.join(vt, "val_diagnostics.csv"), newline="") as f:
                     header = next(csv.reader(f))

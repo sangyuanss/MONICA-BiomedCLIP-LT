@@ -98,17 +98,28 @@ def fuse(visual_logits, text_logits, alpha, Tv, Tt):
     return visual_logits / float(Tv) + a * (text_logits / float(Tt))
 
 
+def fuse_probabilities_with_class_gate(visual_probs, text_probs, alpha_ic,
+                                       eps=1e-8):
+    """Probability-domain fusion with one gate per sample and class."""
+    if visual_probs.shape != text_probs.shape:
+        raise ValueError(
+            "visual_probs and text_probs must have identical shapes, "
+            f"got {visual_probs.shape} and {text_probs.shape}")
+    if not torch.is_tensor(alpha_ic):
+        alpha_ic = torch.full_like(visual_probs, float(alpha_ic))
+    elif alpha_ic.dim() == 1:
+        alpha_ic = alpha_ic[:, None].expand_as(visual_probs)
+    alpha_ic = alpha_ic.to(visual_probs.device, dtype=visual_probs.dtype).clamp(0.0, 1.0)
+    p_hat = (1.0 - alpha_ic) * visual_probs + alpha_ic * text_probs
+    p_fuse = p_hat / p_hat.sum(dim=1, keepdim=True).clamp_min(eps)
+    return p_fuse
+
+
 def prob_scores(visual_logits, text_logits, alpha_ic, Tv, Tt, eps=1e-8):
     """Probability-domain fusion, returned as log-prob scores for MONICA metrics."""
     p_v = F.softmax(visual_logits / float(Tv), dim=1)
     p_t = F.softmax(text_logits / float(Tt), dim=1)
-    if not torch.is_tensor(alpha_ic):
-        alpha_ic = torch.full_like(p_v, float(alpha_ic))
-    elif alpha_ic.dim() == 1:
-        alpha_ic = alpha_ic[:, None].expand_as(p_v)
-    alpha_ic = alpha_ic.to(p_v.device).clamp(0.0, 1.0)
-    p_hat = (1.0 - alpha_ic) * p_v + alpha_ic * p_t
-    p_fuse = p_hat / p_hat.sum(dim=1, keepdim=True).clamp_min(eps)
+    p_fuse = fuse_probabilities_with_class_gate(p_v, p_t, alpha_ic, eps)
     return p_fuse.clamp_min(eps).log()
 
 
@@ -298,6 +309,16 @@ def metric_record(res):
         "auprc": float(100 * auprc),
         "macro_f1": float(100 * f1),
     }
+
+
+def assert_prob_zero_alpha_consistency(p_fused, p_v, rec, visual_prob_rec,
+                                       atol=1e-7, rtol=1e-6):
+    torch.testing.assert_close(p_fused, p_v, rtol=rtol, atol=atol)
+    for key in ("auroc", "auprc", "group_avg_acc", "macro_f1"):
+        diff = abs(float(rec[key]) - float(visual_prob_rec[key]))
+        assert diff < 1e-8, (
+            f"alpha_max=0 probability baseline mismatch for {key}: "
+            f"candidate={rec[key]} visual_prob={visual_prob_rec[key]} diff={diff}")
 
 
 def alpha_stats(alpha):
@@ -528,6 +549,19 @@ def passes_selection_constraints(rec, visual_rec, auroc_drop, auprc_drop):
             and rec["auprc"] >= visual_rec["auprc"] - float(auprc_drop))
 
 
+def add_selection_constraint_fields(rec, baseline_rec, auroc_drop, auprc_drop,
+                                    baseline_domain):
+    rec["selection_baseline_domain"] = baseline_domain
+    rec["selection_baseline_auroc"] = baseline_rec["auroc"]
+    rec["selection_baseline_auprc"] = baseline_rec["auprc"]
+    rec["selection_auroc_threshold"] = baseline_rec["auroc"] - float(auroc_drop)
+    rec["selection_auprc_threshold"] = baseline_rec["auprc"] - float(auprc_drop)
+    rec["constraint_loss"] = constraint_loss(rec, baseline_rec)
+    rec["passes_constraints"] = passes_selection_constraints(
+        rec, baseline_rec, auroc_drop, auprc_drop)
+    return rec
+
+
 def selection_key(rec):
     if not rec.get("passes_constraints", True):
         return (0, -float(rec.get("constraint_loss", 0.0)),
@@ -729,12 +763,22 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
     search = []
     best = None
     for Tv in Tv_grid:
-        visual_res = metricsmod.evaluate_logits(cfg, va_v / float(Tv), labels)
-        visual_rec = metric_record(visual_res)
-        p_v_res = metricsmod.format_summary(visual_res, "visual-val")
-        print("  baseline " + p_v_res)
         p_v = F.softmax(va_v / float(Tv), dim=1)
         p_t = F.softmax(va_t / float(Tt), dim=1)
+        visual_logit_res = metricsmod.evaluate_logits(cfg, va_v / float(Tv), labels)
+        visual_logit_rec = metric_record(visual_logit_res)
+        visual_prob_scores = p_v.clamp_min(1e-8).log()
+        visual_prob_res = metricsmod.evaluate_logits(cfg, visual_prob_scores, labels)
+        visual_prob_rec = metric_record(visual_prob_res)
+        print("  baseline " +
+              metricsmod.format_summary(visual_logit_res, "visual-logit-val"))
+        print("  baseline " +
+              metricsmod.format_summary(visual_prob_res, f"visual-prob-val Tv={Tv:g}"))
+        print("  selection thresholds: "
+              f"AUROC >= {visual_prob_rec['auroc']:.4f} - {args.selection_auroc_drop:g} "
+              f"({visual_prob_rec['auroc'] - args.selection_auroc_drop:.4f}); "
+              f"AUPRC >= {visual_prob_rec['auprc']:.4f} - {args.selection_auprc_drop:g} "
+              f"({visual_prob_rec['auprc'] - args.selection_auprc_drop:.4f})")
         for eta in eta_grid:
             U = combined_uncertainty(va_v, Tv, eta)
             if uses_G:
@@ -760,7 +804,9 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                                 mode, n_val, C, alpha_max, gate=G, tail_need=Q,
                                 class_rel=class_rel if uses_R else None,
                                 benefit=B, device=va_v.device)
-                            scores = prob_scores(va_v, va_t, alpha, Tv, Tt)
+                            p_fused = fuse_probabilities_with_class_gate(
+                                p_v, p_t, alpha)
+                            scores = p_fused.clamp_min(1e-8).log()
                         res = metricsmod.evaluate_logits(cfg, scores, labels)
                         summaries = prob_summary_payload(B, S, G, alpha)
                         rec = {
@@ -784,15 +830,23 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "uncertainty_q_high": q_high if uses_G else None,
                             **metric_record(res),
                             **alpha_stats(alpha),
-                            "visual_val_group_avg_acc": visual_rec["group_avg_acc"],
-                            "visual_val_auroc": visual_rec["auroc"],
-                            "visual_val_auprc": visual_rec["auprc"],
+                            "visual_val_group_avg_acc": visual_prob_rec["group_avg_acc"],
+                            "visual_val_auroc": visual_prob_rec["auroc"],
+                            "visual_val_auprc": visual_prob_rec["auprc"],
+                            "visual_logit_val_group_avg_acc": visual_logit_rec["group_avg_acc"],
+                            "visual_logit_val_auroc": visual_logit_rec["auroc"],
+                            "visual_logit_val_auprc": visual_logit_rec["auprc"],
+                            "visual_prob_val_group_avg_acc": visual_prob_rec["group_avg_acc"],
+                            "visual_prob_val_auroc": visual_prob_rec["auroc"],
+                            "visual_prob_val_auprc": visual_prob_rec["auprc"],
                             **summaries,
                         }
-                        rec["constraint_loss"] = constraint_loss(rec, visual_rec)
-                        rec["passes_constraints"] = passes_selection_constraints(
-                            rec, visual_rec, args.selection_auroc_drop,
-                            args.selection_auprc_drop)
+                        add_selection_constraint_fields(
+                            rec, visual_prob_rec, args.selection_auroc_drop,
+                            args.selection_auprc_drop, "probability")
+                        if float(alpha_max) == 0.0:
+                            assert_prob_zero_alpha_consistency(
+                                p_fused, p_v, rec, visual_prob_rec)
                         search.append(rec)
                         status = "ok" if rec["passes_constraints"] else "drop"
                         print(f"  Tv={Tv:g} amax={alpha_max:g} "
@@ -819,6 +873,11 @@ def prob_validation_search(cfg, args, mode, scheme, head, protos, logit_scale,
                             "uncertainty_q_high": q_high if uses_G else None,
                             "selection_auroc_drop": args.selection_auroc_drop,
                             "selection_auprc_drop": args.selection_auprc_drop,
+                            "selection_baseline_domain": rec["selection_baseline_domain"],
+                            "selection_baseline_auroc": rec["selection_baseline_auroc"],
+                            "selection_baseline_auprc": rec["selection_baseline_auprc"],
+                            "selection_auroc_threshold": rec["selection_auroc_threshold"],
+                            "selection_auprc_threshold": rec["selection_auprc_threshold"],
                         }
                         if best is None or key > best[0]:
                             best = (key, selected, res, alpha, U, G, Q, B, S,
